@@ -2,8 +2,15 @@ import os
 from typing import Any, Callable, List, Optional, Union
 
 import torch
-import torch.distributed as dist
-import torch.distributed.nn.functional as distF
+
+try:
+    import torch.distributed as dist
+    import torch.distributed.nn.functional as distF
+except ImportError:
+    # Minimal/portable torch builds may ship without distributed support;
+    # the helpers below are only needed for multi-GPU training.
+    dist = None
+    distF = None
 from torch import Tensor
 
 

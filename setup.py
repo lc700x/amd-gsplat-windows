@@ -9,8 +9,17 @@ import re
 from setuptools import find_packages, setup
 
 IS_ROCM = True
-ROCM_HOME = "/opt/rocm"
 import torch
+
+ROCM_HOME = os.environ.get("ROCM_HOME") or os.environ.get("ROCM_PATH")
+if IS_ROCM and not ROCM_HOME:
+    # Auto-detect a pip-installed ROCm SDK (TheRock-style wheels ship
+    # _rocm_sdk_devel next to torch with bin/hipcc(.exe), include/, lib/)
+    _sdk = osp.join(osp.dirname(torch.__file__), "..", "_rocm_sdk_devel")
+    if osp.isdir(_sdk):
+        ROCM_HOME = osp.abspath(_sdk)
+if not ROCM_HOME:
+    ROCM_HOME = "/opt/rocm"
 
 __version__ = None
 exec(open("gsplat/version.py", "r").read())
@@ -18,53 +27,74 @@ import subprocess
 
 def get_rocm_arch():
     """
-    Runs rocminfo and extracts the GPU architecture (gfx code).
-    
+    Detects the GPU architecture (gfx code).
+
+    Order: PYTORCH_ROCM_ARCH env -> rocminfo (Linux) -> hipInfo.exe
+    (Windows HIP SDK) -> torch device capability fallback.
+
     Returns:
-        str: The gfx code (e.g., 'gfx942', 'gfx90a'), or 'gfx942' as fallback.
+        str: The gfx code (e.g., 'gfx942', 'gfx1200'), or 'gfx942' as fallback.
     """
+    # 1) Explicit override, same env var torch's cpp_extension honors.
+    env_arch = os.getenv("PYTORCH_ROCM_ARCH")
+    if env_arch:
+        gfx_code = env_arch.replace(" ", ";").split(";")[0].strip()
+        print(f"Using GPU architecture from PYTORCH_ROCM_ARCH: {gfx_code}")
+        return gfx_code
+
     try:
-        # Run rocminfo command
+        # 2) Run rocminfo command (Linux)
         result = subprocess.run(
             ['rocminfo'],
             capture_output=True,
             text=True,
             check=True
         )
-        
-        # Parse the output to find the gfx architecture
-        # Look for lines like "Name:                    gfx942"
+
         output = result.stdout
-        
+
         # Search for gfx code pattern
         match = re.search(r'Name:\s+(gfx[0-9a-z]+)', output)
         if match:
             gfx_code = match.group(1)
             print(f"Detected ROCm GPU architecture: {gfx_code}")
             return gfx_code
-        
-        # Alternative pattern: sometimes it appears as "gfxXXX" directly
-        match = re.search(r'\b(gfx[0-9a-z]+)\b', output)
-        if match:
-            gfx_code = match.group(1)
-            print(f"Detected ROCm GPU architecture: {gfx_code}")
-            return gfx_code
-            
-        print("Warning: Could not detect GPU architecture from rocminfo, using default gfx942")
-        return "gfx942"
-        
-    except subprocess.CalledProcessError as e:
-        print(f"Error running rocminfo: {e}")
-        print("Using default architecture: gfx942")
-        return "gfx942"
-    except FileNotFoundError:
-        print("Error: rocminfo not found. Make sure ROCm is installed and in PATH.")
-        print("Using default architecture: gfx942")
-        return "gfx942"
+
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass  # rocminfo not available (e.g. Windows), try hipInfo next
     except Exception as e:
         print(f"Unexpected error getting ROCm architecture: {e}")
-        print("Using default architecture: gfx942")
-        return "gfx942"
+
+    try:
+        # 3) hipInfo.exe ships with the Windows HIP SDK / pip ROCm SDK
+        hipinfo = osp.join(ROCM_HOME, "bin", "hipInfo.exe")
+        if osp.isfile(hipinfo):
+            result = subprocess.run(
+                [hipinfo],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            match = re.search(r'gcnArchName.*?(gfx[0-9a-z]+)', result.stdout)
+            if match:
+                gfx_code = match.group(1)
+                print(f"Detected ROCm GPU architecture via hipInfo: {gfx_code}")
+                return gfx_code
+    except Exception as e:
+        print(f"Unexpected error running hipInfo: {e}")
+
+    try:
+        # 4) Fall back to the visible torch device (works for RDNA archs)
+        if torch.cuda.is_available():
+            major, minor = torch.cuda.get_device_capability(0)
+            gfx_code = f"gfx{major}{minor}"
+            print(f"Detected GPU architecture from torch device: {gfx_code}")
+            return gfx_code
+    except Exception as e:
+        print(f"Unexpected error querying torch device: {e}")
+
+    print("Warning: Could not detect GPU architecture, using default gfx942")
+    return "gfx942"
 
 def is_git_repo(folder_path):
     """
@@ -175,15 +205,11 @@ def get_extensions():
     if IS_ROCM:
         from torch.utils.cpp_extension import CUDAExtension
         print("ROCM detected, compiling with HIP support...")
-        from torch.utils.cpp_extension import CppExtension
         # Get the GPU architecture dynamically
         gpu_arch = get_rocm_arch()
         print(f"gpu arch is set to {gpu_arch}")
-        conda_prefix = os.getenv("CONDA_PREFIX")
-        conda_lib_path = f"{conda_prefix}/lib"
-        conda_pip_packages = f"{conda_lib_path}/python3.11/site-packages"
+        is_windows = sys.platform == "win32"
 
-        # Use relative path instead of hardcoded absolute path
         extensions_dir = osp.join("gsplat","cuda")
         sources = glob.glob(osp.join(extensions_dir, "csrc", "*.cu")) + glob.glob(osp.join(extensions_dir, "csrc", "*.cpp"))
         sources += [osp.join(extensions_dir, "ext.cpp")]
@@ -191,23 +217,33 @@ def get_extensions():
         undef_macros = []
         define_macros = []
 
-        extra_compile_args = {"cxx": ["-D__HIP_PLATFORM_AMD__" , "-Wno-sign-compare", "-DC10_CUDA_NO_CMAKE_CONFIGURE_FILE", "-DUSE_ROCM"]}
-        if WITH_SYMBOLS:
-            extra_compile_args["cxx"] += ["-g", "-O0"]
+        if is_windows:
+            # Host .cpp files are compiled by MSVC cl.exe on Windows.
+            extra_compile_args = {"cxx": ["/O2", "/bigobj"]}
+            extra_link_args = []
+            # GLM's patched platform.h expects torch's HIP version macro
+            # (CUDA-equivalent encoding); without it the __HIPCC__ branch fails.
+            # GLM's patched platform.h expects torch's HIP version macro
+            # (CUDA-equivalent encoding); without it the __HIPCC__ branch fails.
+            hipcc_flags = ["-O3", "-Wno-attributes", "-Wno-switch", "-Wno-comment",
+                           "-DWIN32_LEAN_AND_MEAN", "-DTORCH_HIP_VERSION=12900"]
         else:
-            extra_compile_args = {"cxx": ["-O3", "-Wno-attributes", "-Wno-switch", "-Wno-comment"]}
+            extra_compile_args = {"cxx": ["-D__HIP_PLATFORM_AMD__" , "-Wno-sign-compare", "-DC10_CUDA_NO_CMAKE_CONFIGURE_FILE", "-DUSE_ROCM"]}
+            if WITH_SYMBOLS:
+                extra_compile_args["cxx"] += ["-g", "-O0"]
+            else:
+                extra_compile_args = {"cxx": ["-O3", "-Wno-attributes", "-Wno-switch", "-Wno-comment"]}
 
-        extra_link_args = ["-s"]
+            extra_link_args = ["-s"]
 
-        # Compile with OpenMP
-        extra_compile_args["cxx"] += ["-DAT_PARALLEL_OPENMP"]
-        extra_compile_args["cxx"] += ["-fopenmp"]
-
-        hipcc_flags = [ "-D__HIP_PLATFORM_AMD__", "-DC10_CUDA_NO_CMAKE_CONFIGURE_FILE", "-DUSE_ROCM" , f"--offload-arch={gpu_arch}"]
-        if WITH_SYMBOLS:
-            hipcc_flags += ["-g", "-ggdb" , "-O0"]
-        else:
-            hipcc_flags += ["-O3" ]
+            hipcc_flags = [ "-D__HIP_PLATFORM_AMD__", "-DC10_CUDA_NO_CMAKE_CONFIGURE_FILE", "-DUSE_ROCM"]
+            if WITH_SYMBOLS:
+                hipcc_flags += ["-g", "-ggdb" , "-O0"]
+            else:
+                hipcc_flags += ["-O3" ]
+        hipcc_flags += [f"--offload-arch={gpu_arch}"]
+        # Kernels rely on implicit half conversions; drop torch's default define.
+        hipcc_flags += ["-U__HIP_NO_HALF_CONVERSIONS__"]
         if LINE_INFO:
             hipcc_flags += ["-gline-tables-only"]
         if torch.version.hip:
@@ -215,22 +251,35 @@ def get_extensions():
             # Define here to support older PyTorch versions as well:
             define_macros += [("USE_ROCM", "1")]
             undef_macros += ["__HIP_NO_HALF_CONVERSIONS__"]
-        if ENABLE_TEST_COVERAGE:
+        if ENABLE_TEST_COVERAGE and not is_windows:
             extra_compile_args['cxx'] += ['-fprofile-instr-generate', '-fcoverage-mapping', '-Qunused-arguments', '--gcc-toolchain=/usr']
             hipcc_flags += ['-fprofile-instr-generate', '-fcoverage-mapping']
             extra_link_args += ['-fprofile-instr-generate']
-	
+
 	# Its still nvcc flags that are used for HIP compilation
         extra_compile_args["nvcc"] = hipcc_flags
         current_dir = pathlib.Path(__file__).parent.resolve()
 
-        include_dirs = [
-            osp.join(current_dir, "gsplat", "cuda", "include"),
-            f"{os.environ['HOME']}/.local/include",
-            f"/opt/conda/include",
-            f"/opt/conda/envs/py_3.12/lib/python3.12/site-packages/",
-            f"/opt/rocm/include",
-        ]
+        glm_path = osp.join(current_dir, "gsplat", "cuda", "csrc", "third_party", "glm")
+        if is_windows:
+            # On Windows, torch's hipify mirrors every header it can resolve
+            # through `include_dirs` into gsplat/hip/, but drops non-standard
+            # files (glm's *.inl) and rewrites includes into fragile relative
+            # paths. Keep glm out of include_dirs and inject it as a raw -I.
+            include_dirs = [osp.join(current_dir, "gsplat", "cuda", "include")]
+            extra_compile_args["cxx"] += [f"-I{glm_path}"]
+            hipcc_flags += [f"-I{glm_path}"]
+        else:
+            include_dirs = [
+                osp.join(current_dir, "gsplat", "cuda", "include"),
+                glm_path,
+            ]
+            include_dirs += [
+                f"{os.environ['HOME']}/.local/include",
+                f"/opt/conda/include",
+                f"/opt/conda/envs/py_3.12/lib/python3.12/site-packages/",
+                f"/opt/rocm/include",
+            ]
 
         extension = CUDAExtension(
             # Make sure this matches your package structure

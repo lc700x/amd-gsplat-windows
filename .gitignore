@@ -125,3 +125,5 @@ data
 results
 
 !examples/benchmarks/compression/results/
+# torch hipify build artifacts (generated during Windows builds)
+gsplat/hip/

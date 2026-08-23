@@ -1,0 +1,5 @@
+--extra-index-url https://rocm.nightlies.amd.com/whl-multi-arch/
+rocm[libraries,device-all]==7.14.0a20260615
+torch[device-all]==2.10.0+rocm7.14.0a20260615
+torchvision[device-all]==0.25.0+rocm7.14.0a20260615
+rocm_sdk_devel==7.14.0a20260615

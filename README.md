@@ -2,19 +2,28 @@
 
 **GSplat** is an open-source library for GPU-accelerated rasterization of Gaussians with Python bindings. It is inspired by the SIGGRAPH paper [3D Gaussian Splatting for Real-Time Rendering of Radiance Fields](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/).
 
-This repository is the HIP port of the original `GSplat` project, optimized for **ROCm**, and designed to run on AMD Instinct™ GPUs. 
+This repository is the HIP port of the original `GSplat` project, optimized for **ROCm**, and designed to run on AMD Instinct™ GPUs and **Windows with AMD Radeon GPUs**.
 
 ## System Requirements
 
-To use GSplat, you need the following prerequisites:
-
+### Linux (ROCm)
 - **ROCm**: version 6.4.3, 7.0.0 (recommended)
 - **Operating system**: Ubuntu 22.04, 24.04  
 - **GPU platform**: AMD Instinct™ MI300X  
 - **PyTorch**: version 2.6, 2.8 (ROCm-enabled)  
 - **Python**: version 3.10, 3.12  
 
+### Windows (ROCm via TheRock portable runtime)
+- **ROCm**: 7.14.0a20260615+ (TheRock nightly)
+- **Operating system**: Windows 10/11 64-bit
+- **GPU platform**: AMD Radeon RX 9000 series (RDNA4 / gfx1200/gfx1201), RX 7000 series (RDNA3 / gfx11xx), MI300 (CDNA3 / gfx942)
+- **PyTorch**: 2.10+ with ROCm 7.14 (TheRock portable build)
+- **Python**: 3.12
+- **MSVC BuildTools**: Visual Studio 2022 BuildTools with C++ workload
+
 ## Installation
+
+### Linux (Docker recommended)
 
 1. Install PyTorch (with ROCm support).  
    The easiest method is using the official ROCm PyTorch Docker image:
@@ -76,7 +85,35 @@ To use GSplat, you need the following prerequisites:
    License: Apache 2.0
    Location: /opt/conda/envs/py_3.12/lib/python3.12/site-packages
    Requires: jaxtyping, ninja, numpy, rich, torch
+   ```
 
+### Windows (TheRock portable Python)
+
+1. Use the TheRock portable ROCm Python runtime (Python 3.12 + PyTorch 2.10 + ROCm 7.14):
+
+   ```powershell
+   # Example using the ml-sharp portable runtime
+   $python = "D:\ml-sharp_portable\ml-sharp_amd_portable\python3\python.exe"
+   $wheel = "amd_gsplat-1.5.3+b01acd4-cp312-cp312-win_amd64.whl"
+   
+   # Install the wheel
+   & $python -m pip install --force-reinstall --no-deps $wheel
+   ```
+
+   Or install from the [GitHub Releases](https://github.com/rocm/gsplat/releases) page (download the `amd_gsplat-*-win_amd64.whl` for your Python version).
+
+2. Verify the installation (run from **outside** the source directory):
+
+   ```powershell
+   & $python -c "import gsplat; import gsplat.csrc; print(gsplat.__version__, gsplat.csrc.__file__)"
+   ```
+
+   Expected output:
+   ```
+   1.5.3 D:\path\to\python3\Lib\site-packages\gsplat\csrc.pyd
+   ```
+
+   The wheel is **standalone** - no dependency on the build source directory.
 
 ## Examples
 
@@ -110,14 +147,35 @@ We provide a set of examples to get you started.
 
 This repository includes a standalone script that reproduces the official Gaussian Splatting benchmarks with equivalent performance on **PSNR, SSIM, LPIPS**, and the number of converged Gaussians.  
 
-Thanks to GSplat’s optimized GPU implementation:  
+Thanks to GSplat's optimized GPU implementation:  
 - Training uses up to **4× less GPU memory**  
 - Training is up to **15% faster** compared to the official implementation  
 
 ## Building from source
+
 Refer to the [installation instructions](docs/install/gsplat-install.rst) to learn how to build the GSplat library from source.
 
+### Windows build notes
+
+The Windows build requires:
+- TheRock portable ROCm Python runtime (or manual ROCm 7.14 + PyTorch 2.10 setup)
+- Visual Studio 2022 BuildTools with C++ workload
+- `ninja` installed in the Python environment
+
+```powershell
+$env:ROCM_HOME = "path\to\_rocm_sdk_devel"
+$env:HIP_PATH = $env:ROCM_HOME
+$env:PYTORCH_ROCM_ARCH = "gfx1200"   # or your GPU architecture
+$env:CXX = "$env:ROCM_HOME\lib\llvm\bin\clang-cl.exe"
+$env:PATH = "$env:ROCM_HOME\bin;$env:ROCM_HOME\lib\llvm\bin;$env:PYTHON_HOME;$env:PYTHON_HOME\Scripts;" + $env:PATH
+
+python setup.py bdist_wheel
+```
+
+The build produces a wheel: `dist/amd_gsplat-*-cp312-cp312-win_amd64.whl`
+
 ## Contributing
+
 We welcome contributions of all kinds and are open to feedback, bug-reports, and improvements, to help expand the capabilities of this software. See [contributing to GSplat](docs/about/contribute-to-gsplat.rst) for more info.
 
 ## Core Development
