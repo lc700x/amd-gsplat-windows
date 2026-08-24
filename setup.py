@@ -34,11 +34,17 @@ def get_rocm_arch():
 
     Returns:
         str: The gfx code (e.g., 'gfx942', 'gfx1200'), or 'gfx942' as fallback.
+             When PYTORCH_ROCM_ARCH lists several archs, they are joined with
+             ';' and ALL of them are compiled into a multi-arch fatbin.
     """
     # 1) Explicit override, same env var torch's cpp_extension honors.
     env_arch = os.getenv("PYTORCH_ROCM_ARCH")
     if env_arch:
-        gfx_code = env_arch.replace(" ", ";").split(";")[0].strip()
+        arch_list = [a.strip() for a in env_arch.replace(" ", ";").split(";") if a.strip()]
+        if len(arch_list) > 1:
+            print(f"Using multiple GPU architectures from PYTORCH_ROCM_ARCH: {arch_list}")
+            return ";".join(arch_list)
+        gfx_code = arch_list[0]
         print(f"Using GPU architecture from PYTORCH_ROCM_ARCH: {gfx_code}")
         return gfx_code
 
@@ -241,7 +247,7 @@ def get_extensions():
                 hipcc_flags += ["-g", "-ggdb" , "-O0"]
             else:
                 hipcc_flags += ["-O3" ]
-        hipcc_flags += [f"--offload-arch={gpu_arch}"]
+        hipcc_flags += [f"--offload-arch={a}" for a in gpu_arch.split(";") if a.strip()]
         # Kernels rely on implicit half conversions; drop torch's default define.
         hipcc_flags += ["-U__HIP_NO_HALF_CONVERSIONS__"]
         if LINE_INFO:
@@ -259,6 +265,31 @@ def get_extensions():
 	# Its still nvcc flags that are used for HIP compilation
         extra_compile_args["nvcc"] = hipcc_flags
         current_dir = pathlib.Path(__file__).parent.resolve()
+
+        if is_windows:
+            # Bundle the VC++ runtime DLLs into the package so end users need
+            # neither VS2022 nor the VC Redistributable installed. The loader
+            # searches the .pyd's own directory first, so dropping them next
+            # to csrc.pyd is sufficient.
+            import shutil as _shutil
+            _crt_candidates = sorted(
+                glob.glob(r"C:\Program Files (x86)\Microsoft Visual Studio\*\*\VC\Redist\MSVC\*\x64\Microsoft.VC143.CRT"),
+                reverse=True,
+            )
+            _pkg_dir = osp.join(current_dir, "gsplat")
+            for _crt in _crt_candidates:
+                copied = []
+                for _dll in ("msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll"):
+                    _src = osp.join(_crt, _dll)
+                    if osp.isfile(_src):
+                        _shutil.copy2(_src, osp.join(_pkg_dir, _dll))
+                        copied.append(_dll)
+                if len(copied) == 3:
+                    print(f"Bundled VC runtime DLLs from {_crt}: {copied}")
+                    break
+            else:
+                print("Warning: VC runtime redist DLLs not found; "
+                      "users may need the VC++ Redistributable installed.")
 
         glm_path = osp.join(current_dir, "gsplat", "cuda", "csrc", "third_party", "glm")
         if is_windows:
@@ -412,6 +443,7 @@ setup(
     ext_modules=get_extensions(),
     cmdclass={"build_ext": get_ext()},
     packages=find_packages(),
+    package_data={"gsplat": ["*.dll"]},
     # https://github.com/pypa/setuptools/issues/1461#issuecomment-954725244
     include_package_data=True,
 )
