@@ -1,5 +1,7 @@
+# AMD ROCm nightly wheels for the Windows multi-arch build.
+# Covers the same 23 GPU targets as the release wheel (gfx900 ... gfx1201).
 --extra-index-url https://rocm.nightlies.amd.com/whl-multi-arch/
-rocm[libraries,device-all]==7.14.0a20260615
-torch[device-all]==2.10.0+rocm7.14.0a20260615
-torchvision[device-all]==0.25.0+rocm7.14.0a20260615
-rocm_sdk_devel==7.14.0a20260615
+rocm[libraries,device-all]==10.1.0a20260822
+torch[device-all]==2.11.0+rocm10.1.0a20260822
+torchvision[device-all]==0.26.0+rocm10.1.0a20260822
+rocm_sdk_devel==10.1.0a20260822

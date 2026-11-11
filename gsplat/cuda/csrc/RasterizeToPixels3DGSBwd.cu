@@ -27,7 +27,7 @@ __device__ void dpp_sclr_warpSum(T &val) {
 	// tmp = tmp + __builtin_amdgcn_mov_dpp(tmp, 0x142, 0xf, 0xf, 1); //BCAST15
 	// tmp = tmp + __builtin_amdgcn_mov_dpp(tmp, 0x143, 0xf, 0xf, 1); //BCAST31
 	// val = __shfl(tmp, 63);
-    rocprim_warpSum<32>(val, NULL);
+    rocprim_warpSum<GSPLAT_WAVEFRONT_SIZE>(val, NULL);
 }
 
 // This version does reduce but stores the result to a specific location (n_val) on a given lane (ln)
@@ -44,8 +44,13 @@ __device__ void dpp_sprd_warpSum(T &val, int ln, T &n_val) {
 	// if (cg::this_thread_block().thread_rank() == ln)
 	//        n_val = tmp;
     T tmp = val;
-    rocprim_warpSum<32>(tmp, NULL);
-    if (cg::this_thread_block().thread_rank() == ln)
+    rocprim_warpSum<GSPLAT_WAVEFRONT_SIZE>(tmp, NULL);
+    // rocPRIM's shuffle-based reduce only leaves the complete sum in lane 0
+    // (every other lane holds a suffix sum), so broadcast it explicitly.
+    tmp = __shfl(tmp, 0);
+    // `ln` is a wave-relative lane id, so compare against the wave-relative
+    // thread rank: a 64-thread block is two 32-lane waves on RDNA.
+    if (int(cg::this_thread_block().thread_rank() % GSPLAT_WAVEFRONT_SIZE) == ln)
         n_val = tmp;
 }
 
@@ -54,7 +59,9 @@ template <uint32_t numel, typename T>
 __device__ void dpp_vec_warpSum(T &val) {
           #pragma unroll
           for (int e=0; e<numel; e++)
-            dpp_sprd_warpSum(val[e], e%32, val[e/32]);
+            dpp_sprd_warpSum(
+                val[e], e % GSPLAT_WAVEFRONT_SIZE,
+                val[e / GSPLAT_WAVEFRONT_SIZE]);
 }
 
 template <typename T>
@@ -82,14 +89,16 @@ __device__ T dpp_warpMax(T &val) {
 	// tmp = max(tmp, __builtin_amdgcn_mov_dpp(tmp, 0x142, 0xf, 0xf, 1)); //BCAST15
 	// tmp = max(tmp, __builtin_amdgcn_mov_dpp(tmp, 0x143, 0xf, 0xf, 1)); //BCAST31
 	// return __shfl(tmp, 63);
-    __shared__ typename rocprim::warp_reduce<int32_t, 32>::storage_type warp_storage;
-    rocprim::warp_reduce<int32_t, 32> wreduce;
+    __shared__ typename rocprim::warp_reduce<int32_t, GSPLAT_WAVEFRONT_SIZE>::storage_type warp_storage;
+    rocprim::warp_reduce<int32_t, GSPLAT_WAVEFRONT_SIZE> wreduce;
     int32_t max;
     wreduce.reduce(val,            // 1) value held by this lane
             max,               // 2) reference that will receive the result
             warp_storage,                 // 3) shared-memory storage
             rocprim::maximum<int32_t>());
-    return max;
+    // Make the result wave-uniform: the shuffle reduce leaves suffix maxima in
+    // the other lanes, and every lane must agree on the loop trip count.
+    return __shfl(max, 0);
 }
 
 template <uint32_t CDIM, typename scalar_t>
@@ -207,7 +216,8 @@ __global__ void rasterize_bs64_to_pixels_3dgs_bwd_kernel(
     // each thread loads one gaussian at a time before rasterizing
     const uint32_t tr = block.thread_rank();
 
-    cg::thread_block_tile<64> warp = cg::tiled_partition<64>(block);
+    cg::thread_block_tile<GSPLAT_WAVEFRONT_SIZE> warp =
+        cg::tiled_partition<GSPLAT_WAVEFRONT_SIZE>(block);
 
     int32_t warp_bin_final =
     dpp_warpMax(bin_final);
@@ -343,9 +353,9 @@ __global__ void rasterize_bs64_to_pixels_3dgs_bwd_kernel(
 
             float *v_rgb_ptr = (float *)(v_colors) + CDIM * g;
 #pragma unroll
-            for (uint32_t k = 0; k < CDIM; k+=64) {
+            for (uint32_t k = 0; k < CDIM; k+=GSPLAT_WAVEFRONT_SIZE) {
 		if (k + warp.thread_rank() < CDIM)
-                    atomicAdd(v_rgb_ptr + k + warp.thread_rank(), v_rgb_local[k/64]);
+                    atomicAdd(v_rgb_ptr + k + warp.thread_rank(), v_rgb_local[k/GSPLAT_WAVEFRONT_SIZE]);
             }
 
             if (warp.thread_rank() == 0) {
@@ -473,7 +483,7 @@ __global__ void rasterize_to_pixels_3dgs_bwd_kernel(
         (float *)&conic_batch[batch_allocation_size]; // [batch_allocation_size * CDIM]
     
     #if USE_ROCM
-    using warp_reduce_float_t = rocprim::warp_reduce<float,32>;
+    using warp_reduce_float_t = rocprim::warp_reduce<float,GSPLAT_WAVEFRONT_SIZE>;
     auto* warp_storage_base   =
     (typename warp_reduce_float_t::storage_type*)
         (rgbs_batch + batch_allocation_size * CDIM);
@@ -500,14 +510,15 @@ __global__ void rasterize_to_pixels_3dgs_bwd_kernel(
     const uint32_t tr = block.thread_rank();
     
     #if USE_ROCM
-    cg::thread_block_tile<64> warp = cg::tiled_partition<64>(block);
+    cg::thread_block_tile<GSPLAT_WAVEFRONT_SIZE> warp =
+        cg::tiled_partition<GSPLAT_WAVEFRONT_SIZE>(block);
     #else
     cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
     #endif
     
     #if USE_ROCM
-        __shared__ typename rocprim::warp_reduce<int32_t, 32>::storage_type warp_storage;
-        rocprim::warp_reduce<int32_t, 32> wreduce;
+        __shared__ typename rocprim::warp_reduce<int32_t, GSPLAT_WAVEFRONT_SIZE>::storage_type warp_storage;
+        rocprim::warp_reduce<int32_t, GSPLAT_WAVEFRONT_SIZE> wreduce;
         int32_t warp_bin_final;
         wreduce.reduce( bin_final,            // 1) value held by this lane
                 warp_bin_final,               // 2) reference that will receive the result
@@ -644,12 +655,12 @@ __global__ void rasterize_to_pixels_3dgs_bwd_kernel(
                 }
             }
             #if USE_ROCM
-            rocprim_warpSum<CDIM, 32>(v_rgb_local, warp_storage_base);   // CDIM-sized float array
-            rocprim_warpSum<32>(v_conic_local, warp_storage_base); // float
-            rocprim_warpSum<32>(v_xy_local, warp_storage_base);    // vec2
+            rocprim_warpSum<CDIM, GSPLAT_WAVEFRONT_SIZE>(v_rgb_local, warp_storage_base);   // CDIM-sized float array
+            rocprim_warpSum<GSPLAT_WAVEFRONT_SIZE>(v_conic_local, warp_storage_base); // float
+            rocprim_warpSum<GSPLAT_WAVEFRONT_SIZE>(v_xy_local, warp_storage_base);    // vec2
             if (v_means2d_abs != nullptr)
-                rocprim_warpSum<32>(v_xy_abs_local, warp_storage_base);// vec2
-            rocprim_warpSum<32>(v_opacity_local, warp_storage_base);// float
+                rocprim_warpSum<GSPLAT_WAVEFRONT_SIZE>(v_xy_abs_local, warp_storage_base);// vec2
+            rocprim_warpSum<GSPLAT_WAVEFRONT_SIZE>(v_opacity_local, warp_storage_base);// float
             if (warp.thread_rank() == 0) {
                 int32_t g = id_batch[t]; // flatten index in [I * N] or [nnz]
                 float *v_rgb_ptr = (float *)(v_colors) + CDIM * g;
@@ -759,9 +770,26 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
     // Optimization for ROCm: Use smaller batch size to reduce shared memory usage
 
     const uint32_t block_size = tile_size * tile_size;
+    // The bs64 kernel keeps one batch of gaussians in per-thread registers and
+    // reads them back with __shfl(..., t).  __shfl can only address lanes of a
+    // single physical wavefront, so that scheme is valid only when the whole
+    // 64-thread block is one wave, i.e. on gfx9 (wave64) targets.  On RDNA
+    // (wave32) a 64-thread block spans two waves and any t >= 32 would read the
+    // neighbouring wave's registers, so use the generic shared-memory kernel.
+    // The wavefront size is a device property, not a host compile-time one, so
+    // it has to be queried at runtime.
+    int device_warp_size = 32;
+    {
+      int device = 0;
+      hipGetDevice(&device);
+      hipDeviceGetAttribute(
+          &device_warp_size, hipDeviceAttributeWarpSize, device);
+    }
+    const bool use_bs64_kernel =
+      (block_size == 64) && (device_warp_size == 64);
     uint32_t max_batch_size;
     int64_t shmem_size;
-    if (block_size == 64) { // wave64-optimized path
+    if (use_bs64_kernel) {
       max_batch_size = 32;
       //max_batch_size = min(max_batch_size, block_size);
       if (CDIM <= 32) {
@@ -776,9 +804,10 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
       if (CDIM <= 16) {
         max_batch_size = block_size;
       }
-      const uint32_t warps_per_block = (block_size + 31) / 32; // for 32-lane wave
+      const uint32_t warps_per_block =
+        (block_size + GSPLAT_WAVEFRONT_SIZE - 1) / GSPLAT_WAVEFRONT_SIZE;
       std::size_t warp_scratch_bytes =
-        warps_per_block * sizeof(typename rocprim::warp_reduce<float,32>::storage_type);
+        warps_per_block * sizeof(typename rocprim::warp_reduce<float,GSPLAT_WAVEFRONT_SIZE>::storage_type);
       shmem_size =
         max_batch_size *
         (sizeof(int32_t) + sizeof(vec3) + sizeof(vec3) + sizeof(float) * CDIM) + warp_scratch_bytes;
@@ -813,7 +842,7 @@ void launch_rasterize_to_pixels_3dgs_bwd_kernel(
         );
     }
 #else
-    auto KERNEL = (block_size == 64) ?
+    auto KERNEL = use_bs64_kernel ?
 	    rasterize_bs64_to_pixels_3dgs_bwd_kernel<CDIM, float> :
 	    rasterize_to_pixels_3dgs_bwd_kernel<CDIM, float>;
     hipError_t err = hipFuncSetAttribute(

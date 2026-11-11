@@ -25,6 +25,20 @@ __version__ = None
 exec(open("gsplat/version.py", "r").read())
 import subprocess
 
+# The 23 GPU targets that ship in the release wheel (identical to the list used
+# by MIGraphX for Windows on ROCm 10.1).  Covers RDNA1-4 (wave32) and
+# GCN/Vega/CDNA (wave64); the kernels pick their wavefront size per target.
+ALL_ROCM_ARCHS = [
+    "gfx1201", "gfx1200",                                        # RDNA4
+    "gfx1153", "gfx1152", "gfx1151", "gfx1150",                   # RDNA3.5
+    "gfx1103", "gfx1102", "gfx1101", "gfx1100",                   # RDNA3
+    "gfx1036", "gfx1035", "gfx1034", "gfx1033",                   # RDNA2
+    "gfx1032", "gfx1031", "gfx1030",
+    "gfx1012", "gfx1011", "gfx1010",                              # RDNA1
+    "gfx906", "gfx90c", "gfx900",                                 # GCN / Vega
+]
+
+
 def get_rocm_arch():
     """
     Detects the GPU architecture (gfx code).
@@ -36,10 +50,14 @@ def get_rocm_arch():
         str: The gfx code (e.g., 'gfx942', 'gfx1200'), or 'gfx942' as fallback.
              When PYTORCH_ROCM_ARCH lists several archs, they are joined with
              ';' and ALL of them are compiled into a multi-arch fatbin.
+             PYTORCH_ROCM_ARCH=all builds the full ALL_ROCM_ARCHS list below.
     """
     # 1) Explicit override, same env var torch's cpp_extension honors.
     env_arch = os.getenv("PYTORCH_ROCM_ARCH")
     if env_arch:
+        if env_arch.strip().lower() in ("all", "migraphx"):
+            print(f"Using the full MIGraphX GPU target list: {ALL_ROCM_ARCHS}")
+            return ";".join(ALL_ROCM_ARCHS)
         arch_list = [a.strip() for a in env_arch.replace(" ", ";").split(";") if a.strip()]
         if len(arch_list) > 1:
             print(f"Using multiple GPU architectures from PYTORCH_ROCM_ARCH: {arch_list}")
@@ -187,7 +205,7 @@ if is_git_repo:
 
 print(f"VERSION = {__version__}")
 
-URL = "https://github.com/rocm/gsplat"
+URL = "https://github.com/lc700x/amd-gsplat-windows"
 
 BUILD_NO_CUDA = os.getenv("BUILD_NO_CUDA", "0") == "1"
 WITH_SYMBOLS =  os.getenv("WITH_SYMBOLS", "0") == "1"
@@ -227,8 +245,6 @@ def get_extensions():
             # Host .cpp files are compiled by MSVC cl.exe on Windows.
             extra_compile_args = {"cxx": ["/O2", "/bigobj"]}
             extra_link_args = []
-            # GLM's patched platform.h expects torch's HIP version macro
-            # (CUDA-equivalent encoding); without it the __HIPCC__ branch fails.
             # GLM's patched platform.h expects torch's HIP version macro
             # (CUDA-equivalent encoding); without it the __HIPCC__ branch fails.
             hipcc_flags = ["-O3", "-Wno-attributes", "-Wno-switch", "-Wno-comment",

@@ -15,6 +15,27 @@ namespace gsplat {
 namespace cg = cooperative_groups;
 
 ///////////////////////////////
+// Wavefront size
+///////////////////////////////
+// AMD GPUs execute 32-lane waves on RDNA (gfx10/gfx11/gfx12) and 64-lane
+// waves on GCN/Vega/CDNA (gfx9).  The wave size has to be a compile-time
+// constant because rocPRIM warp primitives take it as a template argument,
+// so it is derived from the target macro clang defines during the device
+// compilation pass (one pass per --offload-arch).  In the host pass those
+// macros are undefined and 32 is the conservative choice for the launch /
+// shared-memory scratch sizing.
+#if defined(USE_ROCM)
+#    if defined(__GFX9__) // gfx900, gfx906, gfx90c, gfx90a, gfx942, gfx950
+#        define GSPLAT_WAVEFRONT_SIZE 64
+#    else // gfx10xx, gfx11xx, gfx12xx
+#        define GSPLAT_WAVEFRONT_SIZE 32
+#    endif
+#else
+#    define GSPLAT_WAVEFRONT_SIZE 32 // CUDA / NVIDIA warp size
+#endif
+
+
+///////////////////////////////
 // Coordinate Transformations
 ///////////////////////////////
 
@@ -233,7 +254,7 @@ inline __device__ void manual_warpSum(float val[N]) {
     }  
 }
 
-template<int LOGICAL_WARP_SIZE = 32>
+template<int LOGICAL_WARP_SIZE = GSPLAT_WAVEFRONT_SIZE>
 __device__ inline void rocprim_warpSum_scalar(float& val, typename rocprim::warp_reduce<float,LOGICAL_WARP_SIZE>::storage_type*
             warp_storage_base)
 {
@@ -256,7 +277,7 @@ __device__ inline void rocprim_warpSum_scalar(float& val, typename rocprim::warp
 
 //-----------------------------------------------------------------------------
 //  1. float overload  ────────────────────────────────────────────────────────
-template<int LOGICAL_WARP_SIZE = 32>
+template<int LOGICAL_WARP_SIZE = GSPLAT_WAVEFRONT_SIZE>
 __device__ inline void rocprim_warpSum(float& x, typename rocprim::warp_reduce<float,LOGICAL_WARP_SIZE>::storage_type*
                     warp_storage_base)
 {
@@ -265,7 +286,7 @@ __device__ inline void rocprim_warpSum(float& x, typename rocprim::warp_reduce<f
 
 //-----------------------------------------------------------------------------
 //  2. vec2 / vec3 / vec4 overloads  ─────────────────────────────────────────-
-template<int LOGICAL_WARP_SIZE = 32>
+template<int LOGICAL_WARP_SIZE = GSPLAT_WAVEFRONT_SIZE>
 __device__ inline void rocprim_warpSum(vec2& v, typename rocprim::warp_reduce<float,LOGICAL_WARP_SIZE>::storage_type*
                     warp_storage_base)
 {
@@ -273,7 +294,7 @@ __device__ inline void rocprim_warpSum(vec2& v, typename rocprim::warp_reduce<fl
     rocprim_warpSum_scalar<LOGICAL_WARP_SIZE>(v.y, warp_storage_base);
 }
 
-template<int LOGICAL_WARP_SIZE = 32>
+template<int LOGICAL_WARP_SIZE = GSPLAT_WAVEFRONT_SIZE>
 __device__ inline void rocprim_warpSum(vec3& v, typename rocprim::warp_reduce<float,LOGICAL_WARP_SIZE>::storage_type*
                     warp_storage_base)
 {
@@ -282,7 +303,7 @@ __device__ inline void rocprim_warpSum(vec3& v, typename rocprim::warp_reduce<fl
     rocprim_warpSum_scalar<LOGICAL_WARP_SIZE>(v.z, warp_storage_base);
 }
 
-template<int LOGICAL_WARP_SIZE = 32>
+template<int LOGICAL_WARP_SIZE = GSPLAT_WAVEFRONT_SIZE>
 __device__ inline void rocprim_warpSum(vec4& v, typename rocprim::warp_reduce<float,LOGICAL_WARP_SIZE>::storage_type*
                     warp_storage_base)
 {
@@ -294,7 +315,7 @@ __device__ inline void rocprim_warpSum(vec4& v, typename rocprim::warp_reduce<fl
 
 //-----------------------------------------------------------------------------
 //  3. fixed-size float array overload  ───────────────────────────────────────
-template<int N, int LOGICAL_WARP_SIZE = 32>
+template<int N, int LOGICAL_WARP_SIZE = GSPLAT_WAVEFRONT_SIZE>
 __device__ inline void rocprim_warpSum(float (&a)[N], typename rocprim::warp_reduce<float,LOGICAL_WARP_SIZE>::storage_type*
                     warp_storage_base)
 {
@@ -311,7 +332,7 @@ inline __device__ void manual_dynamic_reduce_sum_vec2(
 ) {  
     // First, create a mask of all threads with matching labels  
     unsigned long long my_label_mask = 0;  
-    for (int i = 0; i < 32; ++i) {  
+    for (int i = 0; i < GSPLAT_WAVEFRONT_SIZE; ++i) {  
         if (warp_active_mask & (1ULL << i)) {  
             long long lane_label = __shfl_sync(warp_active_mask, current_label, i);  
             if (lane_label == current_label) {  
@@ -361,7 +382,7 @@ inline __device__ void manual_dynamic_reduce_sum_vec3(
 ) {  
     // First, create a mask of all threads with matching labels  
     unsigned long long my_label_mask = 0;  
-    for (int i = 0; i < 32; ++i) {  
+    for (int i = 0; i < GSPLAT_WAVEFRONT_SIZE; ++i) {  
         if (warp_active_mask & (1ULL << i)) {  
             long long lane_label = __shfl_sync(warp_active_mask, current_label, i);  
             if (lane_label == current_label) {  
@@ -414,7 +435,7 @@ inline __device__ void manual_dynamic_reduce_sum_vec4(
 ) {  
     // First, create a mask of all threads with matching labels  
     unsigned long long my_label_mask = 0;  
-    for (int i = 0; i < 32; ++i) {  
+    for (int i = 0; i < GSPLAT_WAVEFRONT_SIZE; ++i) {  
         if (warp_active_mask & (1ULL << i)) {  
             long long lane_label = __shfl_sync(warp_active_mask, current_label, i);  
             if (lane_label == current_label) {  
@@ -471,7 +492,7 @@ inline __device__ void manual_dynamic_reduce_sum_mat3(
 ) {  
     // First, create a mask of all threads with matching labels  
     unsigned long long my_label_mask = 0;  
-    for (int i = 0; i < 32; ++i) {  
+    for (int i = 0; i < GSPLAT_WAVEFRONT_SIZE; ++i) {  
         if (warp_active_mask & (1ULL << i)) {  
             long long lane_label = __shfl_sync(warp_active_mask, current_label, i);  
             if (lane_label == current_label) {  

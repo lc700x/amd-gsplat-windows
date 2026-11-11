@@ -14,12 +14,15 @@ This repository is the HIP port of the original `GSplat` project, optimized for 
 - **Python**: version 3.10, 3.12  
 
 ### Windows (ROCm via TheRock portable runtime)
-- **ROCm**: 7.14.0a20260615+ (TheRock nightly)
+- **ROCm**: 10.1.0a20260822 (TheRock nightly)
 - **Operating system**: Windows 10/11 64-bit
-- **GPU platform**: AMD Radeon RX 9000 series (RDNA4 / gfx1200/gfx1201), RX 7000 series (RDNA3 / gfx11xx), MI300 (CDNA3 / gfx942)
-- **PyTorch**: 2.10+ with ROCm 7.14 (TheRock portable build)
+- **GPU platform**: 23 targets baked into one wheel — RDNA4 (`gfx1200`, `gfx1201`),
+  RDNA3.5 (`gfx1150`–`gfx1153`), RDNA3 (`gfx1100`–`gfx1103`), RDNA2 (`gfx1030`–`gfx1036`),
+  RDNA1 (`gfx1010`–`gfx1012`), GCN/Vega (`gfx900`, `gfx906`, `gfx90c`)
+- **PyTorch**: 2.11.0+rocm10.1.0a20260822 (TheRock portable build)
 - **Python**: 3.12
-- **MSVC BuildTools**: Visual Studio 2022 BuildTools with C++ workload
+- **Runtime**: none — the wheel bundles the VC++ runtime DLLs, no VS2022 or
+  VC++ Redistributable install is needed
 
 ## Installation
 
@@ -89,18 +92,18 @@ This repository is the HIP port of the original `GSplat` project, optimized for 
 
 ### Windows (TheRock portable Python)
 
-1. Use the TheRock portable ROCm Python runtime (Python 3.12 + PyTorch 2.10 + ROCm 7.14):
+1. Use the TheRock portable ROCm Python runtime (Python 3.12 + PyTorch 2.11 + ROCm 10.1):
 
    ```powershell
    # Example using the ml-sharp portable runtime
    $python = "D:\ml-sharp_portable\ml-sharp_amd_portable\python3\python.exe"
-   $wheel = "amd_gsplat-1.5.3+b01acd4-cp312-cp312-win_amd64.whl"
+   $wheel = "amd_gsplat-1.5.3-cp312-cp312-win_amd64.whl"
    
    # Install the wheel
    & $python -m pip install --force-reinstall --no-deps $wheel
    ```
 
-   Or install from the [GitHub Releases](https://github.com/rocm/gsplat/releases) page (download the `amd_gsplat-*-win_amd64.whl` for your Python version).
+   Or install from the [GitHub Releases](https://github.com/lc700x/amd-gsplat-windows/releases) page (download the `amd_gsplat-*-win_amd64.whl` for your Python version).
 
 2. Verify the installation (run from **outside** the source directory):
 
