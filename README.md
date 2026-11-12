@@ -97,7 +97,7 @@ This repository is the HIP port of the original `GSplat` project, optimized for 
    ```powershell
    # Example using the ml-sharp portable runtime
    $python = "D:\ml-sharp_portable\ml-sharp_amd_portable\python3\python.exe"
-   $wheel = "amd_gsplat-1.5.3-cp312-cp312-win_amd64.whl"
+   $wheel = "amd_gsplat-1.5.3+2a29849-cp312-cp312-win_amd64.whl"
    
    # Install the wheel
    & $python -m pip install --force-reinstall --no-deps $wheel
